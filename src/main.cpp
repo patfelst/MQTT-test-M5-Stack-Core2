@@ -19,7 +19,7 @@ PubSubClient mqttClient(wifiClient);
 const char* stateTopic = "iron_switch";
 const char* commandTopic = "iron_cmd";
 
-#define sw_version         "v0.8"
+#define sw_version         "v0.9"
 #define TFT_WIDTH          320  // The library WIDTH is the short side
 #define TFT_HEIGHT         240  // The library HEIGHT is the long side
 #define buz_duration       200  // When touch buttons are pressed, vibrate the motor for 200ms
