@@ -1,9 +1,11 @@
 #include <ArduinoOTA.h>
 #include <ESP32-Chimera-Core.h>
 #include <ESPmDNS.h>
+#include <OneButton.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
+
 #include "wifi_credentials.h"
 
 const char* ssid = WIFI_SSID;
@@ -19,7 +21,7 @@ PubSubClient mqttClient(wifiClient);
 const char* stateTopic = "iron_switch";
 const char* commandTopic = "iron_cmd";
 
-#define sw_version         "v0.9"
+#define sw_version         "v0.10"
 #define TFT_WIDTH          320  // The library WIDTH is the short side
 #define TFT_HEIGHT         240  // The library HEIGHT is the long side
 #define buz_duration       200  // When touch buttons are pressed, vibrate the motor for 200ms
@@ -61,6 +63,10 @@ const char* commandTopic = "iron_cmd";
 #define Btn_tri_width 20
 #define Btn_tri_ht    (TFT_HEIGHT - 20)
 
+// Wake on touch GPIO
+#define touch_pin_gpio          27
+#define touch_pin_low_threshold 55  // When touched, the touch reading falls. If below this value, ESP32 will reboot
+
 // Timer bar graph
 #define tb_fill_color    TFT_GREEN
 #define tb_border_color  TFT_DARKGREY
@@ -86,6 +92,12 @@ void myOTA_onProgress(unsigned int progress, unsigned int total);
 void myOTA_onEnd();
 void myOTA_onError(ota_error_t error);
 void display_touch_read(uint8_t gpio_pin);
+void mqtt_callback(char* topic, byte* payload, unsigned int length);
+void reconnect();
+void button_1_click();
+void button_1_longpress();
+void button_2_click();
+void button_2_longpress();
 
 uint32_t iron_timer = timer_duration_sec;  // Initial time is 5 minutes = 300 seconds
 uint16_t button_label_colour;
@@ -98,66 +110,38 @@ TFT_eSprite BattSprite = TFT_eSprite(&M5.Lcd);
 TFT_eSprite TimerTxtSprite = TFT_eSprite(&M5.Lcd);
 TFT_eSprite TimerBarSprite = TFT_eSprite(&M5.Lcd);
 
-void mqtt_callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("MQTT message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
-
-  // Switch on the LED if an 1 was received as first character
-  if ((char)payload[0] == '1') {
-    // digitalWrite(BUILTIN_LED, LOW);   // Turn the LED on (Note that LOW is the voltage level
-    // but actually the LED is on; this is because
-    // it is active low on the ESP-01)
-  } else {
-    // digitalWrite(BUILTIN_LED, HIGH);  // Turn the LED off by making the voltage HIGH
-  }
-}
-
-/*
-  reconnect()
-
-  Description:
-  ------------
-  * Reconnect connection with MQTT broker
-
-*/
-void reconnect() {
-  // Loop until we're reconnected
-  while (!mqttClient.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Create a random mqttClient ID
-    String clientId = "ESP32Client-";
-    clientId += String(random(0xffff), HEX);
-    // Attempt to connect
-    if (mqttClient.connect(clientId.c_str(), mqttUser, mqttPassword)) {
-      Serial.println("connected");
-      // Once connected, publish switch turn ON
-      mqttClient.publish(stateTopic, "On");
-      // ... and resubscribe
-      mqttClient.subscribe(commandTopic);
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(mqttClient.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
-    }
-  }
-}
+// Input pin for the button / active low button / enable internal pull-up resistor
+OneButton button_1 = OneButton(32, true, true);
+OneButton button_2 = OneButton(33, true, true);
 
 /*
   touchCallback()
 
   Description:
   ------------
-  * Callback function for touch interrupts
+  * Callback function for GPIO touch interrupts
 
 */
 void touchCallback() {
+}
+
+void button_1_click() {
+  if (iron_timer >= 125)
+    iron_timer -= 120;
+  else
+    iron_timer = 5;
+}
+
+void button_2_click() {
+  iron_timer += 120;
+}
+
+void button_1_longpress() {
+  if (iron_timer >= 5)
+    iron_timer = 5;
+}
+
+void button_2_longpress() {
 }
 
 /*
@@ -170,6 +154,16 @@ void setup() {
   M5.Axp.SetLed(0);  // Turn off green LED
 
   draw_titlebar();
+
+  // Setup button one button callbacks
+  button_1.attachClick(button_1_click);
+  button_1.attachLongPressStart(button_1_longpress);
+  button_2.attachClick(button_2_click);
+  button_2.attachLongPressStart(button_2_longpress);
+
+  // Setup for push button to wake from deep sleep
+  // esp_sleep_enable_ext1_wakeup(0x300000000, ESP_EXT1_WAKEUP_ALL_LOW); // Wake up when GPIO32 and GPIO33 are pressed together
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_33, 0);
 
   // Create sprite for battery symbol
   BattSprite.createSprite(batt_spr_wdth, batt_spr_ht);
@@ -239,6 +233,9 @@ void loop() {
   }
   mqttClient.loop();
 
+  button_1.tick();
+  button_2.tick();
+
   if (M5.Lcd.getTouch(&tx, &ty)) {
     percent = touch_x_to_percent(tx);
     progress_bar(percent);
@@ -265,18 +262,23 @@ void loop() {
         // MQTT code to turn iron OFF
         mqttClient.publish(stateTopic, "Off");
         M5.Lcd.sleep();
-        // Enable interrupt on touch pin GPIO 27, when touch read falls below 51
-        // When not touched, Core2 with solid copper wire and copper tape reads 67
-        // When Core2 plugged into mac via USB, touch reads 20. When not plugged in, reads 50
-        touchAttachInterrupt(27, touchCallback, 55);
-        esp_sleep_enable_touchpad_wakeup();
+        // Enable interrupt on touch GPIO pin "touch_pin_gpio", when touch read falls below "touch_pin_low_threshold"
+        // Core2 running on LiPo battery (not plugged into USB)
+        //    Not touched:  75
+        //    Touched:      53
+        // Core2 plugged into mac via USB:
+        //    Not touched:  75
+        //    Touched:      20
+        // touchAttachInterrupt(touch_pin_gpio, touchCallback, touch_pin_low_threshold);
+        // esp_sleep_enable_touchpad_wakeup();
+
         delay(200);  // Give MQTT message time to be sent
         esp_deep_sleep_start();
       }
     }
 
     // For development, read touch level and display on LCD
-    // display_touch_read(27);
+    // display_touch_read(touch_pin_gpio);
 
     // Update the timer bar graph
     percent = (iron_timer * 100) / timer_duration_sec;
@@ -776,11 +778,62 @@ void myOTA_onError(ota_error_t error) {
   * gpio_pin - the GPIO pin used for touch input
 */
 void display_touch_read(uint8_t gpio_pin) {
-  char txt2[20] = "";
-  M5.Lcd.setFont(&fonts::FreeSansBold9pt7b);
+  char txt2[50] = "";
+  M5.Lcd.setFont(&fonts::FreeSans9pt7b);
   M5.Lcd.setTextDatum(top_left);
   M5.Lcd.setTextPadding(70);
   M5.Lcd.setTextColor(TFT_MAGENTA, TFT_BLACK);
-  sprintf(txt2, "Tch=%d", touchRead(gpio_pin));
-  M5.Lcd.drawString(txt2, 10, 55);
+  sprintf(txt2, "GPIO-%d touch=%d. Wake Thresh=%d", touch_pin_gpio, touchRead(gpio_pin), touch_pin_low_threshold);
+  M5.Lcd.drawString(txt2, 5, 50);
+}
+
+void mqtt_callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("MQTT message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
+
+  // Switch on the LED if an 1 was received as first character
+  if ((char)payload[0] == '1') {
+    // digitalWrite(BUILTIN_LED, LOW);   // Turn the LED on (Note that LOW is the voltage level
+    // but actually the LED is on; this is because
+    // it is active low on the ESP-01)
+  } else {
+    // digitalWrite(BUILTIN_LED, HIGH);  // Turn the LED off by making the voltage HIGH
+  }
+}
+
+/*
+  reconnect()
+
+  Description:
+  ------------
+  * Reconnect connection with MQTT broker
+
+*/
+void reconnect() {
+  // Loop until we're reconnected
+  while (!mqttClient.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Create a random mqttClient ID
+    String clientId = "ESP32Client-";
+    clientId += String(random(0xffff), HEX);
+    // Attempt to connect
+    if (mqttClient.connect(clientId.c_str(), mqttUser, mqttPassword)) {
+      Serial.println("connected");
+      // Once connected, publish switch turn ON
+      mqttClient.publish(stateTopic, "On");
+      // ... and resubscribe
+      mqttClient.subscribe(commandTopic);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(mqttClient.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
 }
