@@ -1,6 +1,7 @@
 #include <ArduinoOTA.h>
 #include <ESP32-Chimera-Core.h>
 #include <ESPmDNS.h>
+#include <FastLED.h>
 #include <OneButton.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
@@ -21,7 +22,7 @@ PubSubClient mqttClient(wifiClient);
 const char* stateTopic = "iron_switch";
 const char* commandTopic = "iron_cmd";
 
-#define sw_version         "v0.10"
+#define sw_version         "v0.20"
 #define TFT_WIDTH          320  // The library WIDTH is the short side
 #define TFT_HEIGHT         240  // The library HEIGHT is the long side
 #define buz_duration       200  // When touch buttons are pressed, vibrate the motor for 200ms
@@ -76,6 +77,10 @@ const char* commandTopic = "iron_cmd";
 #define tb_width         (TFT_WIDTH - tb_right_margin - tb_left_margin)
 #define tb_height        25
 
+// RGB LED defines
+#define LED_COUNT 10
+#define LED_PIN   25
+
 void draw_titlebar();
 void label_touch_buttons();
 uint8_t lipo_capacity_percent(float);
@@ -113,6 +118,8 @@ TFT_eSprite TimerBarSprite = TFT_eSprite(&M5.Lcd);
 // Input pin for the button / active low button / enable internal pull-up resistor
 OneButton button_1 = OneButton(32, true, true);
 OneButton button_2 = OneButton(33, true, true);
+
+CRGB leds[LED_COUNT];  // WS2812 RGB LED object
 
 /*
   touchCallback()
@@ -154,6 +161,12 @@ void setup() {
   M5.Axp.SetLed(0);  // Turn off green LED
 
   draw_titlebar();
+
+  // Setup RGB LED
+  FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, LED_COUNT);
+  FastLED.setBrightness(0);
+  fill_solid(leds, LED_COUNT, CRGB::Black);
+  FastLED.show();
 
   // Setup button one button callbacks
   button_1.attachClick(button_1_click);
