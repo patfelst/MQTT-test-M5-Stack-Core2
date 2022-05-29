@@ -1,7 +1,5 @@
 #include <ArduinoOTA.h>
-#include <ESP32-Chimera-Core.h>
-#include <ESPmDNS.h>
-#include <FastLED.h>
+#include <M5Unified.h>
 #include <OneButton.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
@@ -13,7 +11,7 @@ const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWD;
 
 // MQTT settings
-IPAddress mqttServer(192, 168, 0, 16);  // MQTT Server IP address, i.e. ESPHome IP address
+IPAddress mqttServer(192, 168, 1, 128);  // MQTT Server IP address, i.e. ESPHome IP address
 const int mqttPort = 1883;
 const char* mqttUser = "esp32";
 const char* mqttPassword = "core2";
@@ -22,7 +20,7 @@ PubSubClient mqttClient(wifiClient);
 const char* stateTopic = "iron_switch";
 const char* commandTopic = "iron_cmd";
 
-#define sw_version         "v0.20"
+#define sw_version         "v0.30"
 #define TFT_WIDTH          320  // The library WIDTH is the short side
 #define TFT_HEIGHT         240  // The library HEIGHT is the long side
 #define buz_duration       200  // When touch buttons are pressed, vibrate the motor for 200ms
@@ -86,7 +84,6 @@ void label_touch_buttons();
 uint8_t lipo_capacity_percent(float);
 void disp_batt_symbol(uint16_t batt_x, uint16_t batt_y, bool disp_volts);
 void draw_timer_msg(const char* msg);
-void haptic_buzz(uint16_t duration_ms);
 void display_pmu_vals();
 uint8_t touch_x_to_percent(uint32_t touch_x);
 void progress_bar(uint8_t percent);
@@ -111,15 +108,14 @@ uint16_t title_bar_txt_colour = M5.Lcd.color24to16(0x262626);
 uint32_t last_iron_time = 0;
 uint32_t last_display_update = 0;
 
-TFT_eSprite BattSprite = TFT_eSprite(&M5.Lcd);
-TFT_eSprite TimerTxtSprite = TFT_eSprite(&M5.Lcd);
-TFT_eSprite TimerBarSprite = TFT_eSprite(&M5.Lcd);
+// Create sprites
+M5Canvas BattSprite(&M5.Lcd);
+M5Canvas TimerTxtSprite(&M5.Lcd);
+M5Canvas TimerBarSprite(&M5.Lcd);
 
 // Input pin for the button / active low button / enable internal pull-up resistor
 OneButton button_1 = OneButton(32, true, true);
 OneButton button_2 = OneButton(33, true, true);
-
-CRGB leds[LED_COUNT];  // WS2812 RGB LED object
 
 /*
   touchCallback()
@@ -157,16 +153,24 @@ void button_2_longpress() {
 -----------------
 */
 void setup() {
+  auto cfg = M5.config();
+  cfg.serial_baudrate = 115200;  // default=115200. if "Serial" is not needed, set it to 0.
+  cfg.clear_display = true;      // default=true. clear the screen when begin.
+  cfg.output_power = true;       // default=true. use external port 5V output.
+  cfg.internal_imu = true;       // default=true. use internal IMU.
+  cfg.internal_rtc = true;       // default=true. use internal RTC.
+  cfg.internal_spk = true;       // default=true. use internal speaker.
+  cfg.led_brightness = 64;       // default= 0. system LED brightness (0=off / 255=max) (※ not NeoPixel)
   M5.begin();
-  M5.Axp.SetLed(0);  // Turn off green LED
 
   draw_titlebar();
 
-  // Setup RGB LED
-  FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, LED_COUNT);
-  FastLED.setBrightness(0);
-  fill_solid(leds, LED_COUNT, CRGB::Black);
-  FastLED.show();
+  // Display AXP192 Power Management Values
+  // do {
+  //   M5.update();
+  //   delay(1000);
+  //   display_pmu_vals();
+  // } while (!M5.BtnA.wasClicked());
 
   // Setup button one button callbacks
   button_1.attachClick(button_1_click);
@@ -190,20 +194,43 @@ void setup() {
   // Create sprite for time remaining bargraph
   TimerBarSprite.createSprite(tb_width, tb_height);
 
-  // Setup WiFi
-  draw_timer_msg("Connecting WiFi");
+  // Display WiFi starting message
+  M5.Lcd.setTextDatum(top_center);
+  M5.Lcd.setFont(&fonts::FreeSans18pt7b);
+  M5.Lcd.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  M5.Lcd.drawString("Starting WiFi", time_msg_x, time_msg_y);
+
+  // Set location where "connecting..." dots will appear
+  M5.Lcd.setCursor(110, 120);
+  uint8_t tries_count = 0;
+  bool connected = false;
+
   // Serial.println("Booting");
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  while (WiFi.waitForConnectResult() != WL_CONNECTED) {
-    Serial.println("Connection Failed! Rebooting...");
-    delay(5000);
-    ESP.restart();
+  do {
+    delay(500);
+    M5.Lcd.print(".");
+    tries_count++;
+    connected = (WiFi.status() == WL_CONNECTED);
+  } while (!connected && (tries_count < 10));
+
+  M5.Lcd.setTextPadding(280);
+
+  if (connected) {
+    M5.Lcd.drawString("Connected!", time_msg_x, time_msg_y);
+  } else {
+    // WiFi not connected
+    M5.Lcd.drawString("No WiFi", time_msg_x, time_msg_y);
+    M5.Lcd.sleep();
+    esp_deep_sleep_start();
   }
 
   // Start MQTT client
   mqttClient.setServer(mqttServer, mqttPort);
   mqttClient.setCallback(mqtt_callback);
+  reconnect();  // Turn on switch if MQTT connected
+  delay(1000); // Give user time to read WiFI Connected message
 
   // Setup callbacks for OTA updates
   ArduinoOTA.onStart(myOTA_onStart);
@@ -211,8 +238,7 @@ void setup() {
   ArduinoOTA.onEnd(myOTA_onEnd);
   ArduinoOTA.onError(myOTA_onError);
 
-  draw_timer_msg("Done");
-  delay(500);
+  clear_centre_lcd();
   draw_timer_msg(time_left_msg);
 
   // Display a full progress bar to begin count down timer
@@ -469,8 +495,9 @@ uint8_t lipo_capacity_percent(float voltage) {
 -----------------
 */
 void disp_batt_symbol(uint16_t batt_x, uint16_t batt_y, bool disp_volts) {
-  float batt_volt = M5.Axp.GetBatVoltage();
-  uint8_t batt_percent = lipo_capacity_percent(batt_volt);
+  // float batt_volt = M5.Axp.GetBatVoltage();
+  float batt_volt = M5.Power.Axp192.getBatteryVoltage();
+  uint8_t batt_percent = M5.Power.getBatteryLevel();
   int16_t batt_fill_length = (batt_percent * batt_rect_height) / 100;
   uint16_t fill_colour = TFT_MAGENTA;
   uint16_t outline_colour = TFT_BLACK;
@@ -520,7 +547,7 @@ void disp_batt_symbol(uint16_t batt_x, uint16_t batt_y, bool disp_volts) {
   BattSprite.fillRect(spr_x_offs + 2, batt_spr_ht - batt_fill_length + 2, batt_rect_width - 4, batt_fill_length - 4, fill_colour);
 
   // Draw lighning bolt symbol
-  if (M5.Axp.isCharging()) {
+  if (M5.Power.Axp192.isCharging()) {
     uint16_t cntre_x = spr_x_offs + (batt_rect_width / 2);
     uint16_t cntre_y = batt_spr_ht - (batt_rect_height / 2) - 3;
     BattSprite.fillTriangle(cntre_x - 15, cntre_y - 2, cntre_x, cntre_y, cntre_x + 2, cntre_y + 6, TFT_ORANGE);
@@ -573,23 +600,6 @@ void label_touch_buttons() {
 }
 
 /*
-  haptic_buzz()
-
-  Description:
-  ------------
-  * Pulse the Core2 haptic motor for a short period
-
-  Inputs:
-  -------
-  * duration_ms - the amount of time to turn the buzzer on
-*/
-void haptic_buzz(uint16_t duration_ms) {
-  M5.Axp.SetLDOEnable(3, true);  // Start the vibration
-  delay(duration_ms);
-  M5.Axp.SetLDOEnable(3, false);  // Stop the vibration
-}
-
-/*
   display_pmu_vals()
 
   Description:
@@ -615,31 +625,31 @@ void display_pmu_vals() {
   // Note: isCharging() referred to wrong bit, should be 0x04, not 0x02
   // bool AXP192_M5Core2::isCharging()
   //   return ( Read8bit(0x00) & 0x04 ) ? true : false;
-  sprintf(txt, "Bat Charging = %s\n", M5.Axp.isCharging() ? "true" : "false");
+  sprintf(txt, "Bat Charging = %s\n", M5.Power.Axp192.isCharging() ? "true" : "false");
   M5.Lcd.drawString(txt, xpos, ypos);
   ypos += font_ht;
 
-  sprintf(txt, "BatVoltage = %.2fV\n", M5.Axp.GetBatVoltage());
+  sprintf(txt, "BatVoltage = %.2fV\n", M5.Power.Axp192.getBatteryVoltage());
   M5.Lcd.drawString(txt, xpos, ypos);
   ypos += font_ht;
 
-  sprintf(txt, "BatCurrent = %.2fmA\n", M5.Axp.GetBatCurrent());
+  sprintf(txt, "BatCurrent = %.2fmA\n", M5.Power.Axp192.getBatteryChargeCurrent());
   M5.Lcd.drawString(txt, xpos, ypos);
   ypos += font_ht;
 
-  sprintf(txt, "VinVoltage = %.2fV\n", M5.Axp.GetVinVoltage());
+  sprintf(txt, "VinVoltage = %.2fV\n", M5.Power.Axp192.getACINVolatge());
   M5.Lcd.drawString(txt, xpos, ypos);
   ypos += font_ht;
 
-  sprintf(txt, "VinCurrent = %.2fmA\n", M5.Axp.GetVinCurrent());
+  sprintf(txt, "VinCurrent = %.2fmA\n", M5.Power.Axp192.getACINCurrent());
   M5.Lcd.drawString(txt, xpos, ypos);
   ypos += font_ht;
 
-  sprintf(txt, "VBusVoltage = %.2fV\n", M5.Axp.GetVBusVoltage());
+  sprintf(txt, "VBusVoltage = %.2fV\n", M5.Power.Axp192.getVBUSVoltage());
   M5.Lcd.drawString(txt, xpos, ypos);
   ypos += font_ht;
 
-  sprintf(txt, "VBusCurrent = %.2fmA\n", M5.Axp.GetVBusCurrent());
+  sprintf(txt, "VBusCurrent = %.2fmA\n", M5.Power.Axp192.getVBUSCurrent());
   M5.Lcd.drawString(txt, xpos, ypos);
   ypos += font_ht;
 }
