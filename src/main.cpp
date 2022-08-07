@@ -11,7 +11,7 @@ const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWD;
 
 // MQTT settings
-IPAddress mqttServer(192, 168, 1, 128);  // MQTT Server IP address, i.e. ESPHome IP address
+IPAddress mqttServer(192, 168, 20, 2);  // MQTT Server IP address, i.e. ESPHome IP address
 const int mqttPort = 1883;
 const char* mqttUser = "esp32";
 const char* mqttPassword = "core2";
@@ -20,7 +20,7 @@ PubSubClient mqttClient(wifiClient);
 const char* stateTopic = "iron_switch";
 const char* commandTopic = "iron_cmd";
 
-#define sw_version         "v0.30"
+#define sw_version         "v0.31"
 #define TFT_WIDTH          320  // The library WIDTH is the short side
 #define TFT_HEIGHT         240  // The library HEIGHT is the long side
 #define buz_duration       200  // When touch buttons are pressed, vibrate the motor for 200ms
